@@ -1,11 +1,11 @@
+use libc::{IPPROTO_IP, IP_TTL};
+use std::env;
+use std::io::{self, Write};
+use std::mem;
 use std::net::{SocketAddr, UdpSocket};
+use std::os::unix::io::AsRawFd;
 use std::thread;
 use std::time::Duration;
-use std::env;
-use std::os::unix::io::AsRawFd;
-use libc::{IPPROTO_IP, IP_TTL};
-use std::mem;
-use std::io::{self, Write};
 
 const TTL_VALUE_BIT_0: u8 = 254;
 const TTL_VALUE_BIT_1: u8 = 253;
@@ -37,15 +37,23 @@ impl TtlSENDChannel {
         let socket = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind socket");
 
         // Create a new instance of TtlChannel with the socket and TTL values.
-        TtlSENDChannel { 
-            socket, 
-        }
+        TtlSENDChannel { socket }
     }
 
     fn send_bit(&mut self, bit: bool, destination: SocketAddr) {
-        let ttl_value = if bit { TTL_VALUE_BIT_1 } else { TTL_VALUE_BIT_0 };
+        let ttl_value = if bit {
+            TTL_VALUE_BIT_1
+        } else {
+            TTL_VALUE_BIT_0
+        };
         let result = unsafe {
-            libc::setsockopt(self.socket.as_raw_fd(), IPPROTO_IP, IP_TTL, &ttl_value as *const _ as *const _, std::mem::size_of_val(&ttl_value) as u32)
+            libc::setsockopt(
+                self.socket.as_raw_fd(),
+                IPPROTO_IP,
+                IP_TTL,
+                &ttl_value as *const _ as *const _,
+                std::mem::size_of_val(&ttl_value) as u32,
+            )
         };
         if result != 0 {
             panic!("Failed to set TTL");
@@ -59,17 +67,16 @@ impl TtlSENDChannel {
             let bits = to_bits(c as u8);
             for bit in bits.iter() {
                 self.send_bit(*bit, destination);
-                if *bit == true{
-                    print!("1");
-                } else {
-                    print!("0");
-                }
-                thread::sleep(Duration::from_millis((1000 / PACKET_TRANSMISSION_RATE).into()));
+                //if *bit == true {
+                    //print!("1");
+                //} else {
+                    //print!("0");
+                //}
+                thread::sleep(Duration::from_millis((1840 / PACKET_TRANSMISSION_RATE).into(), // Act of Union
+                ));
             }
         }
     }
-
-    
 }
 
 struct TtlRECVChannel {
@@ -79,31 +86,36 @@ struct TtlRECVChannel {
 }
 
 impl TtlRECVChannel {
-
     fn new_receive() -> Self {
         // Create a new raw socket
         let socket = unsafe { libc::socket(libc::AF_INET, libc::SOCK_RAW, libc::IPPROTO_UDP) };
         if socket < 0 {
             panic!("Failed to create raw socket");
         }
-    
+
         // Set socket options to include the IP header
         let opt: libc::c_int = 1;
         unsafe {
-            libc::setsockopt(socket, libc::IPPROTO_IP, libc::IP_HDRINCL, &opt as *const _ as *const libc::c_void, mem::size_of::<libc::c_int>() as libc::socklen_t);
+            libc::setsockopt(
+                socket,
+                libc::IPPROTO_IP,
+                libc::IP_HDRINCL,
+                &opt as *const _ as *const libc::c_void,
+                mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
         }
 
         TtlRECVChannel {
             socket: socket,
             start_ttl: 100,
-            hops: 254
+            hops: 254,
         }
     }
 
     fn receive_bit(&mut self, ttl: u8) -> bool {
         //print!("RECEIVING bit-->");
-        let mut toggle:bool = true;
-        let mut _dismiss:bool = false;
+        let mut toggle: bool = true;
+        let mut _dismiss: bool = false;
         if self.start_ttl == 100 {
             self.start_ttl = ttl;
             self.hops = TTL_VALUE_BIT_0 - ttl; //254 - 241 = 13 hops ahead.
@@ -115,19 +127,18 @@ impl TtlRECVChannel {
                 //print!("0");
                 //io::stdout().flush().expect("Failed to flush stdout");
                 toggle = true
-            },
+            }
             (true, ttl) if ttl == TTL_VALUE_BIT_1 - self.hops => {
                 //print!("1");
                 //io::stdout().flush().expect("Failed to flush stdout");
                 toggle = false
-            },
+            }
             _ => {
                 // Handle other cases if needed
                 _dismiss = true // or whatever default behavior you want
             }
         }
         toggle
-        
     }
 
     fn receive_message(&mut self) -> String {
@@ -138,7 +149,7 @@ impl TtlRECVChannel {
         let mut bits = [false; 8];
         let mut bit_count = 0;
         let mut ttl_initiator = true;
-        let mut first:bool = false;
+        //let mut first: bool = false;
         loop {
             // Receive a packet
             let bytes_received = unsafe {
@@ -153,52 +164,50 @@ impl TtlRECVChannel {
             };
 
             if bytes_received < 0 {
-                continue
+                continue;
             }
 
             // Parse the IP header
             let ip_header: &Ipv4Header = unsafe { &*(buffer.as_ptr() as *const Ipv4Header) };
 
-            if ttl_initiator{
+            if ttl_initiator {
                 self.receive_bit(ip_header.ttl);
                 ttl_initiator = false;
-                first = true;
+                //first = true;
             } else {
-                if first{
-                    first = false
-                } else {
-                    //println!("BITCOUNT={}", bit_count);
-                    //println!("TTL-->{}", ip_header.ttl);
-                    bits[bit_count] = self.receive_bit(ip_header.ttl);
+                //println!("BITCOUNT={}", bit_count);
+                //println!("TTL-->{}", ip_header.ttl);
+                bits[bit_count] = self.receive_bit(ip_header.ttl);
 
-                    bit_count = bit_count + 1;
+                bit_count = bit_count + 1;
 
-                    if bit_count == 8{
-                        println!("");
-                        let mut bitstream = String::new();
-                        for bit in bits{
-                            if !bit{
-                                //print!("1");
-                                //io::stdout().flush().expect("Failed to flush stdout");
-                                bitstream.push('1');
-                            } else {
-                                //print!("0");
-                                //io::stdout().flush().expect("Failed to flush stdout");
-                                bitstream.push('0');
-                            }
+                if bit_count == 8 {
+                    //println!("");
+                    let mut bitstream = String::new();
+                    for bit in bits {
+                        if !bit {
+                            //print!("1");
+                            //io::stdout().flush().expect("Failed to flush stdout");
+                            bitstream.push('1');
+                        } else {
+                            //print!("0");
+                            //io::stdout().flush().expect("Failed to flush stdout");
+                            bitstream.push('0');
                         }
-                        let decimal_value = i32::from_str_radix(&bitstream, 2).unwrap();
-                        //let byte = to_bytes(bits);
-                        //println!("decimal={}", decimal_value);
-                        let c = match char::from_u32(decimal_value as u32) {
-                            Some(c) => c,
-                            None => '?',
-                        };
-                        message.push(c);
-                        print!("{}", c);
-                        io::stdout().flush().expect("Failed to flush stdout");
-                        bit_count = 0;
                     }
+                    //print!("-->");
+
+                    let decimal_value = i32::from_str_radix(&bitstream, 2).unwrap();
+                    //let byte = to_bytes(bits);
+                    //println!("decimal={}", decimal_value);
+                    let c = match char::from_u32(decimal_value as u32) {
+                        Some(c) => c,
+                        None => '?',
+                    };
+                    message.push(c);
+                    print!("{}", c);
+                    io::stdout().flush().expect("Failed to flush stdout");
+                    bit_count = 0;
                 }
             }
         }
@@ -213,7 +222,6 @@ fn to_bits(byte: u8) -> [bool; 8] {
     bits
 }
 
-
 fn to_bytes(bits: [bool; 8]) -> u8 {
     let mut byte = 0;
     for (i, bit) in bits.iter().enumerate() {
@@ -223,7 +231,6 @@ fn to_bytes(bits: [bool; 8]) -> u8 {
     }
     byte
 }
-
 
 fn main() {
     let args: Vec<String> = env::args().collect();
