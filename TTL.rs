@@ -2,7 +2,7 @@ use libc::{IPPROTO_IP, IP_TTL};
 use std::env;
 use std::io::{self, Write};
 use std::mem;
-use std::net::{SocketAddr, UdpSocket, IpAddr};
+use std::net::{SocketAddr, UdpSocket, IpAddr, Ipv4Addr};
 use std::os::unix::io::AsRawFd;
 use std::thread;
 use std::time::Duration;
@@ -13,9 +13,8 @@ const PACKET_SIZE: usize = 40; // Emulate traceroute
 const PACKET_TRANSMISSION_RATE: u32 = 1; // packets per second ( 1 packet/second/hop = normal)
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct UdpPacket {
-    ipv4_header: Ipv4Header,
     header: UdpHeader,
     payload: UdpPayload,
 }
@@ -45,9 +44,10 @@ struct UdpHeader {
     checksum: u16,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct UdpPayload {
-    data: Vec<u8>, // Dynamic size payload
+    ipv4_header: Ipv4Header,
+    data: [u8; PACKET_SIZE-20], 
 }
 
 
@@ -84,7 +84,10 @@ impl TtlSENDChannel {
         }
 
         let mut packet = Vec::new();
-        for byte in destination.to_string().as_bytes(){
+        let dst_ip: IpAddr = destination.ip();
+        let dst_port: u16 = destination.port();
+        let dst_packet: SocketAddr = SocketAddr::new(dst_ip, dst_port);
+        for byte in dst_packet.to_string().as_bytes(){
             packet.push(*byte);
         }
         let padding = PACKET_SIZE - packet.len();
@@ -144,32 +147,45 @@ impl TtlRECVChannel {
     }
 
     fn checks(&mut self, udp_packet: UdpPacket) -> bool {
-        let destination = SocketAddr::new(IpAddr::V4(udp_packet.ipv4_header.dst_addr.into()), udp_packet.header.destination_port);
+        let dst_addr: u32 = udp_packet.payload.ipv4_header.dst_addr; //TEST
+        let destination_port: u16 = udp_packet.header.destination_port; 
+    
+        // Convert u32 to Ipv4Addr
+        let ipv4_addr = Ipv4Addr::from(dst_addr); // Convert to big-endian
+    
+        // Create the SocketAddr
+        let destination = SocketAddr::new(IpAddr::V4(ipv4_addr), destination_port);
         let dst_str = destination.to_string();
         let checks = dst_str.as_bytes();
-        let mut pass = vec![false; checks.len()];
-        let payload= udp_packet.payload.data;
-        for (index, check) in checks.iter().enumerate() {
-            if *check == payload[index]{
-                pass[index] = true;
+    
+        // Get the payload data
+        let payload = udp_packet.payload.data;
+
+        // Print the checks and payload for debugging
+        //println!("Checks: {:?}", String::from_utf8_lossy(checks));
+        //println!("Payload: {:?}", String::from_utf8_lossy(&payload));
+    
+        // Compare checks with payload
+        for (index, &check) in checks.iter().enumerate() {
+            if check != payload[index] {
+                //println!("FAILED--CHECKS at index {}", index);
+                return false;
             }
         }
-        for passed in pass{
-            if !passed{
-                return false
-            }
-        }
+    
+        //println!("CHECKS PASSED");
         true
     }
+    
 
     fn receive_bit(&mut self, udp_packet: UdpPacket) -> bool {
         //print!("RECEIVING bit-->");
         let mut toggle: bool = true;
         let mut _dismiss: bool = false;
-        let ttl = udp_packet.ipv4_header.ttl;
+        let ttl = udp_packet.payload.ipv4_header.ttl;
         if self.start_ttl == 100 {
-            self.start_ttl = udp_packet.ipv4_header.ttl;
-            self.hops = TTL_VALUE_BIT_0 - udp_packet.ipv4_header.ttl; //254 - 241 = 13 hops ahead.
+            self.start_ttl = udp_packet.payload.ipv4_header.ttl;
+            self.hops = TTL_VALUE_BIT_0 - udp_packet.payload.ipv4_header.ttl; //254 - 241 = 13 hops ahead.
         }
 
         let pass = self.checks(udp_packet);
