@@ -1,5 +1,5 @@
 use get_if_addrs::{get_if_addrs, IfAddr};
-use libc::{IPPROTO_IP, IP_TTL};
+use libc::{IPPROTO_IP, IP_TTL, IP_TOS, IPTOS_MINCOST};
 use std::env;
 use std::io::{self, Write, Read};
 use std::mem;
@@ -11,7 +11,7 @@ use std::time::Duration;
 const TTL_VALUE_BIT_0: u8 = 254;
 const TTL_VALUE_BIT_1: u8 = 253;
 const PACKET_SIZE: usize = 40; // Emulate traceroute
-const PACKET_TRANSMISSION_RATE: u32 = 96; // packets per second ( 1 packet/second/hop = normal)
+static mut PACKET_TRANSMISSION_RATE: u32 = 96; // packets per second ( 1 packet/second/hop = normal): i32 = 96;
 
 #[derive(Debug, Clone, Copy)]
 struct UdpPacket {
@@ -77,8 +77,24 @@ impl TtlSENDChannel {
                 std::mem::size_of_val(&ttl_value) as u32,
             )
         };
-        if result != 0 {
+
+        if result != 0{
             panic!("Failed to set TTL");
+        }
+
+        
+        let result_tos = unsafe {
+            libc::setsockopt(
+                self.socket.as_raw_fd(),
+                IPPROTO_IP,
+                IP_TOS,
+                &IPTOS_MINCOST as *const _ as *const _,
+                std::mem::size_of_val(&IPTOS_MINCOST) as u32,
+            )
+        };
+        
+        if result_tos != 0{
+            panic!("Failed to set TOS");
         }
 
         let mut packet = Vec::new();
@@ -105,7 +121,7 @@ impl TtlSENDChannel {
                 //print!("0");
                 //}
                 thread::sleep(Duration::from_millis(
-                    (2000 / PACKET_TRANSMISSION_RATE).into(),
+                    (2000 / unsafe {PACKET_TRANSMISSION_RATE}).into(),
                 ));
             }
         }
@@ -355,13 +371,16 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
-        println!("Usage: ttl_channel [send*|receive] [destination*]");
+        println!("Usage: ttl_channel [send*|receive] [destination*] [Packets Per Seconds*[default=96]]");
         return;
     }
 
     
     let action = &args[1];
     if action == "send" {
+        if args.len() == 4{
+            unsafe {PACKET_TRANSMISSION_RATE = args[3].parse().unwrap()};
+        }
         let mut message = String::new();
         io::stdin().read_to_string(&mut message).expect("Failed to read from stdin");
         let destination_to = &args[2];
