@@ -11,7 +11,7 @@ use std::time::Duration;
 const TTL_VALUE_BIT_0: u8 = 254;
 const TTL_VALUE_BIT_1: u8 = 253;
 const PACKET_SIZE: usize = 40; // Emulate traceroute
-const PACKET_TRANSMISSION_RATE: u32 = 8; // packets per second ( 1 packet/second/hop = normal)
+const PACKET_TRANSMISSION_RATE: u32 = 96; // packets per second ( 1 packet/second/hop = normal)
 
 #[derive(Debug, Clone, Copy)]
 struct UdpPacket {
