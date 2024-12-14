@@ -1,7 +1,7 @@
 use get_if_addrs::{get_if_addrs, IfAddr};
 use libc::{IPPROTO_IP, IP_TTL};
 use std::env;
-use std::io::{self, Write};
+use std::io::{self, Write, Read};
 use std::mem;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::os::unix::io::AsRawFd;
@@ -355,18 +355,20 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
-        println!("Usage: ttl_channel [send*|receive] [destination*] [message*]");
+        println!("Usage: ttl_channel [send*|receive] [destination*]");
         return;
     }
 
+    
     let action = &args[1];
     if action == "send" {
+        let mut message = String::new();
+        io::stdin().read_to_string(&mut message).expect("Failed to read from stdin");
         let destination_to = &args[2];
         let destination: SocketAddr = destination_to.parse().expect("Invalid destination address");
         let mut channel = TtlSENDChannel::new_send();
         channel.send_bit(false, destination); // Adjust the receiving end's TTL.
-        let message = &args[3];
-        channel.send_message(message, destination);
+        channel.send_message(&message, destination);
     } else if action == "receive" {
         let interface_ips: Vec<String> = get_interfaces_ip();
         let mut channel = TtlRECVChannel::new_receive();
