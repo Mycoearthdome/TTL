@@ -11,7 +11,7 @@ use std::time::Duration;
 const TTL_VALUE_BIT_0: u8 = 254;
 const TTL_VALUE_BIT_1: u8 = 253;
 const PACKET_SIZE: usize = 40; // Emulate traceroute
-const PACKET_TRANSMISSION_RATE: u32 = 1; // packets per second ( 1 packet/second/hop = normal)
+const PACKET_TRANSMISSION_RATE: u32 = 8; // packets per second ( 1 packet/second/hop = normal)
 
 #[derive(Debug, Clone, Copy)]
 struct UdpPacket {
@@ -147,11 +147,14 @@ impl TtlRECVChannel {
 
     fn checks(&mut self, udp_packet: UdpPacket, interface_ips:Vec<String>) -> bool {
         // Get the payload data
-        let payload = &udp_packet.payload.data[20..];
+        let payload = &udp_packet.payload.data;
         for interface_ip in interface_ips{
             let mut passing = true;
             let checks = interface_ip.as_bytes();
 
+            //println!("{}", String::from_utf8(checks.to_vec()).unwrap());
+            //println!("{}", String::from_utf8(payload.to_vec()).unwrap());
+            
             // Compare checks with payload
             for (index, &check) in checks.iter().enumerate() {
                 if check != payload[index] {
@@ -178,8 +181,8 @@ impl TtlRECVChannel {
             self.hops = TTL_VALUE_BIT_0 - udp_packet.ipv4_header.ttl; //254 - 241 = 13 hops ahead.
         }
 
-        println!("HOPS-->{}", self.hops);
-        println!("TTL-->{}", ttl);
+        //println!("HOPS-->{}", self.hops);
+        //println!("TTL-->{}", ttl);
 
         let pass = self.checks(udp_packet, interface_ips);
 
@@ -189,7 +192,7 @@ impl TtlRECVChannel {
                 //print!("0");
                 //io::stdout().flush().expect("Failed to flush stdout");
                 if pass {
-                    println!("TOGGLED-TRUE");
+                    //println!("TOGGLED-TRUE");
                     toggle = true
                 }
             }
@@ -197,7 +200,7 @@ impl TtlRECVChannel {
                 //print!("1");
                 //io::stdout().flush().expect("Failed to flush stdout");
                 if pass {
-                    println!("TOGGLED-FALSE");
+                    //println!("TOGGLED-FALSE");
                     toggle = false
                 }
             }
@@ -236,7 +239,7 @@ impl TtlRECVChannel {
             }
 
             // Parse the IP header
-            let udp_packet: &UdpPacket = unsafe { &*(buffer.as_ptr() as *const UdpPacket) };
+            let udp_packet = parse_udp_packet(&buffer).unwrap();
 
             if ttl_initiator {
                 self.receive_bit(udp_packet.clone(), interface_ips.clone());
@@ -321,6 +324,32 @@ fn get_interfaces_ip() -> Vec<String> {
     }
     ipv4_addesses
 }
+
+fn parse_udp_packet(buffer: &[u8]) -> Result<UdpPacket, &'static str> {
+    if buffer.len() < std::mem::size_of::<Ipv4Header>() + std::mem::size_of::<UdpHeader>() {
+        return Err("Buffer too small to contain UDP packet");
+    }
+
+    let ipv4_header: Ipv4Header = unsafe { *(buffer.as_ptr() as *const Ipv4Header) };
+    let udp_header_offset = std::mem::size_of::<Ipv4Header>();
+    let udp_header: UdpHeader = unsafe {
+        *(buffer[udp_header_offset..].as_ptr() as *const UdpHeader)
+    };
+
+    let payload_offset = udp_header_offset + std::mem::size_of::<UdpHeader>();
+    let payload_data: [u8; PACKET_SIZE] = buffer[payload_offset..payload_offset+PACKET_SIZE]
+        .try_into()
+        .map_err(|_| "Payload size mismatch")?;
+
+    let payload = UdpPayload { data: payload_data };
+
+    Ok(UdpPacket {
+        ipv4_header,
+        header:udp_header,
+        payload,
+    })
+}
+
 
 fn main() {
     let args: Vec<String> = env::args().collect();
