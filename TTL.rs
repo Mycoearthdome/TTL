@@ -1,8 +1,9 @@
+use get_if_addrs::{get_if_addrs, IfAddr};
 use libc::{IPPROTO_IP, IP_TTL};
 use std::env;
 use std::io::{self, Write};
 use std::mem;
-use std::net::{SocketAddr, UdpSocket, IpAddr, Ipv4Addr};
+use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::os::unix::io::AsRawFd;
 use std::thread;
 use std::time::Duration;
@@ -12,9 +13,9 @@ const TTL_VALUE_BIT_1: u8 = 253;
 const PACKET_SIZE: usize = 40; // Emulate traceroute
 const PACKET_TRANSMISSION_RATE: u32 = 1; // packets per second ( 1 packet/second/hop = normal)
 
-
 #[derive(Debug, Clone, Copy)]
 struct UdpPacket {
+    ipv4_header: Ipv4Header,
     header: UdpHeader,
     payload: UdpPayload,
 }
@@ -34,7 +35,6 @@ struct Ipv4Header {
     dst_addr: u32,
 }
 
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct UdpHeader {
@@ -46,10 +46,8 @@ struct UdpHeader {
 
 #[derive(Debug, Clone, Copy)]
 struct UdpPayload {
-    ipv4_header: Ipv4Header,
-    data: [u8; PACKET_SIZE-20], 
+    data: [u8; PACKET_SIZE],
 }
-
 
 struct TtlSENDChannel {
     socket: UdpSocket,
@@ -87,11 +85,11 @@ impl TtlSENDChannel {
         let dst_ip: IpAddr = destination.ip();
         let dst_port: u16 = destination.port();
         let dst_packet: SocketAddr = SocketAddr::new(dst_ip, dst_port);
-        for byte in dst_packet.to_string().as_bytes(){
+        for byte in dst_packet.to_string().as_bytes() {
             packet.push(*byte);
         }
         let padding = PACKET_SIZE - packet.len();
-        packet.extend(vec![0;padding]);
+        packet.extend(vec![0; padding]);
 
         self.socket.send_to(&packet, destination).unwrap();
     }
@@ -102,11 +100,12 @@ impl TtlSENDChannel {
             for bit in bits.iter() {
                 self.send_bit(*bit, destination);
                 //if *bit == true {
-                    //print!("1");
+                //print!("1");
                 //} else {
-                    //print!("0");
+                //print!("0");
                 //}
-                thread::sleep(Duration::from_millis((2000 / PACKET_TRANSMISSION_RATE).into(),
+                thread::sleep(Duration::from_millis(
+                    (2000 / PACKET_TRANSMISSION_RATE).into(),
                 ));
             }
         }
@@ -146,63 +145,59 @@ impl TtlRECVChannel {
         }
     }
 
-    fn checks(&mut self, udp_packet: UdpPacket) -> bool {
-        let dst_addr: u32 = udp_packet.payload.ipv4_header.dst_addr; //TEST
-        let destination_port: u16 = udp_packet.header.destination_port; 
-    
-        // Convert u32 to Ipv4Addr
-        let ipv4_addr = Ipv4Addr::from(dst_addr); // Convert to big-endian
-    
-        // Create the SocketAddr
-        let destination = SocketAddr::new(IpAddr::V4(ipv4_addr), destination_port);
-        let dst_str = destination.to_string();
-        let checks = dst_str.as_bytes();
-    
+    fn checks(&mut self, udp_packet: UdpPacket, interface_ips:Vec<String>) -> bool {
         // Get the payload data
-        let payload = udp_packet.payload.data;
+        let payload = &udp_packet.payload.data[20..];
+        for interface_ip in interface_ips{
+            let mut passing = true;
+            let checks = interface_ip.as_bytes();
 
-        // Print the checks and payload for debugging
-        //println!("Checks: {:?}", String::from_utf8_lossy(checks));
-        //println!("Payload: {:?}", String::from_utf8_lossy(&payload));
-    
-        // Compare checks with payload
-        for (index, &check) in checks.iter().enumerate() {
-            if check != payload[index] {
-                //println!("FAILED--CHECKS at index {}", index);
-                return false;
+            // Compare checks with payload
+            for (index, &check) in checks.iter().enumerate() {
+                if check != payload[index] {
+                    //println!("FAILED--CHECKS at index {}", index);
+                    passing = false;
+                }
+            }
+            
+            if passing{
+                //println!("IP CHECKS PASSED");
+                return passing
             }
         }
-    
-        //println!("CHECKS PASSED");
-        true
+        false
     }
-    
 
-    fn receive_bit(&mut self, udp_packet: UdpPacket) -> bool {
+    fn receive_bit(&mut self, udp_packet: UdpPacket, interface_ips:Vec<String>) -> bool {
         //print!("RECEIVING bit-->");
         let mut toggle: bool = true;
         let mut _dismiss: bool = false;
-        let ttl = udp_packet.payload.ipv4_header.ttl;
+        let ttl = udp_packet.ipv4_header.ttl;
         if self.start_ttl == 100 {
-            self.start_ttl = udp_packet.payload.ipv4_header.ttl;
-            self.hops = TTL_VALUE_BIT_0 - udp_packet.payload.ipv4_header.ttl; //254 - 241 = 13 hops ahead.
+            self.start_ttl = udp_packet.ipv4_header.ttl;
+            self.hops = TTL_VALUE_BIT_0 - udp_packet.ipv4_header.ttl; //254 - 241 = 13 hops ahead.
         }
 
-        let pass = self.checks(udp_packet);
+        println!("HOPS-->{}", self.hops);
+        println!("TTL-->{}", ttl);
+
+        let pass = self.checks(udp_packet, interface_ips);
 
         //println!("{}", self.hops);
         match (self.start_ttl >= 100, ttl) {
             (true, ttl) if ttl == TTL_VALUE_BIT_0 - self.hops => {
                 //print!("0");
                 //io::stdout().flush().expect("Failed to flush stdout");
-                if pass{
+                if pass {
+                    println!("TOGGLED-TRUE");
                     toggle = true
                 }
             }
             (true, ttl) if ttl == TTL_VALUE_BIT_1 - self.hops => {
                 //print!("1");
                 //io::stdout().flush().expect("Failed to flush stdout");
-                if pass{
+                if pass {
+                    println!("TOGGLED-FALSE");
                     toggle = false
                 }
             }
@@ -214,7 +209,7 @@ impl TtlRECVChannel {
         toggle
     }
 
-    fn receive_message(&mut self) -> String {
+    fn receive_message(&mut self, interface_ips:Vec<String>) -> String {
         let mut message = String::new();
         println!("RECEIVING-MESSAGE-->");
         // Buffer to hold the incoming packet
@@ -244,13 +239,13 @@ impl TtlRECVChannel {
             let udp_packet: &UdpPacket = unsafe { &*(buffer.as_ptr() as *const UdpPacket) };
 
             if ttl_initiator {
-                self.receive_bit(udp_packet.clone());
+                self.receive_bit(udp_packet.clone(), interface_ips.clone());
                 ttl_initiator = false;
                 //first = true;
             } else {
                 //println!("BITCOUNT={}", bit_count);
                 //println!("TTL-->{}", ip_header.ttl);
-                bits[bit_count] = self.receive_bit(udp_packet.clone());
+                bits[bit_count] = self.receive_bit(udp_packet.clone(), interface_ips.clone());
 
                 bit_count = bit_count + 1;
 
@@ -305,6 +300,28 @@ fn to_bytes(bits: [bool; 8]) -> u8 {
     byte
 }
 
+fn get_interfaces_ip() -> Vec<String> {
+    let mut ipv4_addesses = Vec::new();
+    match get_if_addrs() {
+        Ok(interfaces) => {
+            for interface in interfaces {
+                //println!("Interface: {}", interface.name);
+                let addr = interface.addr;
+                match addr {
+                    IfAddr::V4(v4_addr) => {
+                        ipv4_addesses.push(v4_addr.ip.to_string())
+                    }
+                    IfAddr::V6(_v4_addr) => {}
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Error getting network interfaces: {}", e);
+        }
+    }
+    ipv4_addesses
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
@@ -322,8 +339,9 @@ fn main() {
         let message = &args[3];
         channel.send_message(message, destination);
     } else if action == "receive" {
+        let interface_ips: Vec<String> = get_interfaces_ip();
         let mut channel = TtlRECVChannel::new_receive();
-        channel.receive_message();
+        channel.receive_message(interface_ips);
     } else {
         println!("Invalid action. Please use 'send' or 'receive'.");
     }
