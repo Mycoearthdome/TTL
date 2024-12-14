@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 libc = "0.2.168"
+get_if_addrs = "0.5.3"
 
 
 [[bin]]
