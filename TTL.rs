@@ -2,7 +2,7 @@ use libc::{IPPROTO_IP, IP_TTL};
 use std::env;
 use std::io::{self, Write};
 use std::mem;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{SocketAddr, UdpSocket, IpAddr};
 use std::os::unix::io::AsRawFd;
 use std::thread;
 use std::time::Duration;
@@ -11,6 +11,14 @@ const TTL_VALUE_BIT_0: u8 = 254;
 const TTL_VALUE_BIT_1: u8 = 253;
 const PACKET_SIZE: usize = 40; // Emulate traceroute
 const PACKET_TRANSMISSION_RATE: u32 = 1; // packets per second ( 1 packet/second/hop = normal)
+
+
+#[derive(Debug, Clone)]
+struct UdpPacket {
+    ipv4_header: Ipv4Header,
+    header: UdpHeader,
+    payload: UdpPayload,
+}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -26,6 +34,22 @@ struct Ipv4Header {
     src_addr: u32,
     dst_addr: u32,
 }
+
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct UdpHeader {
+    source_port: u16,
+    destination_port: u16,
+    length: u16,
+    checksum: u16,
+}
+
+#[derive(Debug, Clone)]
+struct UdpPayload {
+    data: Vec<u8>, // Dynamic size payload
+}
+
 
 struct TtlSENDChannel {
     socket: UdpSocket,
@@ -58,7 +82,14 @@ impl TtlSENDChannel {
         if result != 0 {
             panic!("Failed to set TTL");
         }
-        let packet = vec![0; PACKET_SIZE];
+
+        let mut packet = Vec::new();
+        for byte in destination.to_string().as_bytes(){
+            packet.push(*byte);
+        }
+        let padding = PACKET_SIZE - packet.len();
+        packet.extend(vec![0;padding]);
+
         self.socket.send_to(&packet, destination).unwrap();
     }
 
@@ -72,7 +103,7 @@ impl TtlSENDChannel {
                 //} else {
                     //print!("0");
                 //}
-                thread::sleep(Duration::from_millis((1840 / PACKET_TRANSMISSION_RATE).into(), // Act of Union
+                thread::sleep(Duration::from_millis((2000 / PACKET_TRANSMISSION_RATE).into(),
                 ));
             }
         }
@@ -112,26 +143,52 @@ impl TtlRECVChannel {
         }
     }
 
-    fn receive_bit(&mut self, ttl: u8) -> bool {
+    fn checks(&mut self, udp_packet: UdpPacket) -> bool {
+        let destination = SocketAddr::new(IpAddr::V4(udp_packet.ipv4_header.dst_addr.into()), udp_packet.header.destination_port);
+        let dst_str = destination.to_string();
+        let checks = dst_str.as_bytes();
+        let mut pass = vec![false; checks.len()];
+        let payload= udp_packet.payload.data;
+        for (index, check) in checks.iter().enumerate() {
+            if *check == payload[index]{
+                pass[index] = true;
+            }
+        }
+        for passed in pass{
+            if !passed{
+                return false
+            }
+        }
+        true
+    }
+
+    fn receive_bit(&mut self, udp_packet: UdpPacket) -> bool {
         //print!("RECEIVING bit-->");
         let mut toggle: bool = true;
         let mut _dismiss: bool = false;
+        let ttl = udp_packet.ipv4_header.ttl;
         if self.start_ttl == 100 {
-            self.start_ttl = ttl;
-            self.hops = TTL_VALUE_BIT_0 - ttl; //254 - 241 = 13 hops ahead.
+            self.start_ttl = udp_packet.ipv4_header.ttl;
+            self.hops = TTL_VALUE_BIT_0 - udp_packet.ipv4_header.ttl; //254 - 241 = 13 hops ahead.
         }
+
+        let pass = self.checks(udp_packet);
 
         //println!("{}", self.hops);
         match (self.start_ttl >= 100, ttl) {
             (true, ttl) if ttl == TTL_VALUE_BIT_0 - self.hops => {
                 //print!("0");
                 //io::stdout().flush().expect("Failed to flush stdout");
-                toggle = true
+                if pass{
+                    toggle = true
+                }
             }
             (true, ttl) if ttl == TTL_VALUE_BIT_1 - self.hops => {
                 //print!("1");
                 //io::stdout().flush().expect("Failed to flush stdout");
-                toggle = false
+                if pass{
+                    toggle = false
+                }
             }
             _ => {
                 // Handle other cases if needed
@@ -168,16 +225,16 @@ impl TtlRECVChannel {
             }
 
             // Parse the IP header
-            let ip_header: &Ipv4Header = unsafe { &*(buffer.as_ptr() as *const Ipv4Header) };
+            let udp_packet: &UdpPacket = unsafe { &*(buffer.as_ptr() as *const UdpPacket) };
 
             if ttl_initiator {
-                self.receive_bit(ip_header.ttl);
+                self.receive_bit(udp_packet.clone());
                 ttl_initiator = false;
                 //first = true;
             } else {
                 //println!("BITCOUNT={}", bit_count);
                 //println!("TTL-->{}", ip_header.ttl);
-                bits[bit_count] = self.receive_bit(ip_header.ttl);
+                bits[bit_count] = self.receive_bit(udp_packet.clone());
 
                 bit_count = bit_count + 1;
 
