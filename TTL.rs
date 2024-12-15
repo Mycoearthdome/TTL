@@ -10,7 +10,7 @@ use std::time::Duration;
 
 const TTL_VALUE_BIT_0: u8 = 254;
 const TTL_VALUE_BIT_1: u8 = 253;
-const PACKET_SIZE: usize = 40; // Emulate traceroute
+const PACKET_SIZE: usize = 22;
 static mut PACKET_TRANSMISSION_RATE: u32 = 96; // packets per second ( 1 packet/second/hop = normal): i32 = 96;
 
 #[derive(Debug, Clone, Copy)]
@@ -151,6 +151,19 @@ impl TtlRECVChannel {
                 libc::IP_HDRINCL,
                 &opt as *const _ as *const libc::c_void,
                 mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+
+        let buffer_size = 1024 * 1024; // 1MB buffer size
+        let buffer = buffer_size as libc::c_int;
+
+        unsafe {
+            libc::setsockopt(
+                socket,
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                &buffer as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&buffer) as u32,
             );
         }
 
