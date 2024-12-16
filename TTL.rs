@@ -224,6 +224,7 @@ impl TtlRECVChannel {
 
         //println!("{}", String::from_utf8(hash.to_vec()).unwrap());
         //println!("{}", String::from_utf8(payload.to_vec()).unwrap());
+        //println!("");
             
         // Compare checks with payload
         for (index, &password) in hash.iter().enumerate() {
@@ -233,10 +234,11 @@ impl TtlRECVChannel {
             }
         }
             
-            if passing{
-                //println!("IP CHECKS PASSED");
-                return passing
-            }
+        if passing{
+        //println!("IP CHECKS PASSED");
+            return passing
+        }
+
         false
     }
 
@@ -313,6 +315,7 @@ impl TtlRECVChannel {
 
             if ttl_initiator {
                 self.receive_bit(udp_packet.clone(), &initial_hashing);
+                println!("-->Received Password!");
                 ttl_initiator = false;
                 //first = true;
             } else {
@@ -350,12 +353,11 @@ impl TtlRECVChannel {
                     print!("{}", c);
                     io::stdout().flush().expect("Failed to flush stdout");
                     bit_count = 0;
-                    if password_index == PASSWORDS.len() -1{
-                        password_index = 0;
-                    } else {
-                        password_index = password_index + 1;
-                    }
-                    
+                }
+                if password_index == PASSWORDS.len() -1{
+                    password_index = 0;
+                } else {
+                    password_index = password_index + 1;
                 }
             }
         }
