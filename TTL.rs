@@ -196,7 +196,7 @@ impl TtlRECVChannel {
             );
         }
 
-        let buffer_size = 1024 * 1024; // 1MB buffer size
+        let buffer_size = 1024 * 1024 * 10; // 10MB buffer size
         let buffer = buffer_size as libc::c_int;
 
         unsafe {
