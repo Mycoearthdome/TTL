@@ -20,7 +20,6 @@ static mut PACKET_TRANSMISSION_RATE: u32 = 500; // packets per second
 
 #[derive(Debug, Clone, Copy)]
 struct UdpPacket {
-    ipv4_header: Ipv4Header,
     header: UdpHeader,
     payload: UdpPayload,
 }
@@ -137,21 +136,9 @@ impl TtlRECVChannel {
             panic!("Failed to create raw socket");
         }
 
-        // Set socket options to include the IP header
-        let opt: libc::c_int = 1;
-        unsafe {
-            libc::setsockopt(
-                socket,
-                libc::IPPROTO_IP,
-                libc::IP_HDRINCL,
-                &opt as *const _ as *const libc::c_void,
-                mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
-        }
-
         let buffer_size = 1024 * 1024 * 10; // 10MB buffer size
         let buffer = buffer_size as libc::c_int;
-
+        // Adding a buffer to the socket.
         unsafe {
             libc::setsockopt(
                 socket,
@@ -189,13 +176,12 @@ impl TtlRECVChannel {
         false
     }
 
-    fn receive_bit(&mut self, udp_packet: UdpPacket, hashing: &PasswordBasedHash) -> bool {
+    fn receive_bit(&mut self, ttl:u8, udp_packet:UdpPacket, hashing: &PasswordBasedHash) -> bool {
         let mut toggle: bool = true;
         let mut _dismiss: bool = false;
-        let ttl = udp_packet.ipv4_header.ttl;
         if self.start_ttl == 100 {
-            self.start_ttl = udp_packet.ipv4_header.ttl;
-            self.hops = TTL_VALUE_BIT_0 - udp_packet.ipv4_header.ttl;
+            self.start_ttl = ttl;
+            self.hops = TTL_VALUE_BIT_0 - ttl;
         }
 
         let pass = self.checks(udp_packet, hashing);
@@ -244,6 +230,7 @@ impl TtlRECVChannel {
         let mut tcp_recv_stream: TcpStream;
         let mut previous_source_addr = self.initialize_socket_address();
         let mut udp_payload: Vec<u8>;
+        let mut data = Vec::new();
 
         loop {
             // Receive a packet
@@ -262,9 +249,10 @@ impl TtlRECVChannel {
             let source_addr = sender_address_transform(src_addr).unwrap();
 
             if ttl_initiator || previous_source_addr.ip() == source_addr.ip() {
+                let ttl = buffer[9];
                 let udp_packet = parse_udp_packet(&buffer).unwrap();
                 if ttl_initiator {
-                    self.receive_bit(udp_packet.clone(), &initial_hashing);
+                    self.receive_bit(ttl, udp_packet, &initial_hashing);
                     let tcp_incoming =
                         self.open_tcp_control_port(udp_packet.header.destination_port.to_be());
                     match tcp_incoming.accept() {
@@ -282,17 +270,18 @@ impl TtlRECVChannel {
                     }
                     ttl_initiator = false;
                 } else {
-                    udp_payload = parse_udp_payload(&buffer);
-                    let _ = io::stdout().write(&udp_payload[..]);
-                    let _ = io::stdout().flush();
+                    udp_payload = parse_udp_payload(&buffer[20..]); //stripping ip_headers
+                    data.extend(udp_payload);
                     if bytes_received < WINDOW_SIZE as isize{
                         break;
                     }
                     buffer = vec![0u8; WINDOW_SIZE]; //clear
-                    udp_payload.clear();
                }
             }
         }
+        let _ = io::stdout().write_all(&data);
+        let _ = io::stdout().flush();
+
     }
 }
 
@@ -315,11 +304,10 @@ fn array_to_string(arr: [u8; 32]) -> String {
 }
 
 fn parse_udp_packet(buffer: &[u8]) -> Result<UdpPacket, &'static str> {
-    if buffer.len() < std::mem::size_of::<Ipv4Header>() + std::mem::size_of::<UdpHeader>() {
+    if buffer.len() < std::mem::size_of::<UdpHeader>() {
         return Err("Buffer too small to contain UDP packet");
     }
 
-    let ipv4_header: Ipv4Header = unsafe { *(buffer.as_ptr() as *const Ipv4Header) };
     let udp_header_offset = std::mem::size_of::<Ipv4Header>();
     let udp_header: UdpHeader =
         unsafe { *(buffer[udp_header_offset..].as_ptr() as *const UdpHeader) };
@@ -332,15 +320,13 @@ fn parse_udp_packet(buffer: &[u8]) -> Result<UdpPacket, &'static str> {
     let payload = UdpPayload { data: payload_data };
 
     Ok(UdpPacket {
-        ipv4_header,
         header: udp_header,
         payload,
     })
 }
 
 fn parse_udp_payload(buffer: &[u8]) -> Vec<u8> {
-    let udp_header_offset = std::mem::size_of::<Ipv4Header>();
-    let payload_offset = udp_header_offset + std::mem::size_of::<UdpHeader>();
+    let payload_offset = std::mem::size_of::<UdpHeader>();
     let payload_data: Vec<u8> = buffer[payload_offset..].to_vec();
 
     payload_data
