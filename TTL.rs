@@ -115,7 +115,7 @@ impl TtlSENDChannel {
         data: Vec<u8>,
         destination: SocketAddr,
     ) {
-        for c in data.chunks(WINDOW_SIZE) { // TCP HEADER (MAX 24 bytes) + UDP HEADER (8 bytes). :)
+        for c in data.chunks(WINDOW_SIZE) {
             self.socket.send_to(c, destination).unwrap();
             thread::sleep(Duration::from_millis((1000 / unsafe { PACKET_TRANSMISSION_RATE }).into()));
         }
@@ -223,7 +223,11 @@ impl TtlRECVChannel {
 
     fn receive_message(&mut self, initial_hashing: PasswordBasedHash) {
         let tcp_write_buffer:[u8; 1]  = [1; 1]; //NULL
-        let mut buffer = vec![0u8; WINDOW_SIZE]; // Maximum size for an IP packet
+        let ipv4_header_len = std::mem::size_of::<Ipv4Header>();
+        let udp_header_len = std::mem::size_of::<UdpHeader>();
+        let packet_len = ipv4_header_len + udp_header_len + WINDOW_SIZE;
+        let total_header_len = ipv4_header_len + udp_header_len;
+        let mut buffer = vec![0u8; packet_len];
         let mut ttl_initiator = true;
         let mut src_addr: sockaddr = unsafe { mem::zeroed() };
         let mut addrlen: socklen_t = mem::size_of_val(&src_addr) as socklen_t;
@@ -249,7 +253,7 @@ impl TtlRECVChannel {
             let source_addr = sender_address_transform(src_addr).unwrap();
 
             if ttl_initiator || previous_source_addr.ip() == source_addr.ip() {
-                let ttl = buffer[9];
+                let ttl = buffer[8];
                 let udp_packet = parse_udp_packet(&buffer).unwrap();
                 if ttl_initiator {
                     self.receive_bit(ttl, udp_packet, &initial_hashing);
@@ -270,12 +274,13 @@ impl TtlRECVChannel {
                     }
                     ttl_initiator = false;
                 } else {
-                    udp_payload = parse_udp_payload(&buffer[20..]); //stripping ip_headers
-                    data.extend(udp_payload);
-                    if bytes_received < WINDOW_SIZE as isize{
+                    udp_payload = parse_udp_payload(&buffer[ipv4_header_len..]); //stripping ip_headers
+
+                    data.extend(&udp_payload[..bytes_received as usize - total_header_len]);
+                    if bytes_received < packet_len as isize{
                         break;
                     }
-                    buffer = vec![0u8; WINDOW_SIZE]; //clear
+                    buffer = vec![0u8; packet_len]; //clear
                }
             }
         }
@@ -334,8 +339,9 @@ fn parse_udp_payload(buffer: &[u8]) -> Vec<u8> {
 
 fn tcp_control(channel: &mut TtlSENDChannel, data: Vec<u8>, destination: SocketAddr) {
     let buffer: &mut [u8; 1] = &mut [0; 1];
-    // Listen for incoming connections
-    let stream = TcpStream::connect_timeout(&destination, Duration::from_millis(10000));
+    // Establish a tcp communication after a short 200ms sleep to let the server time to set up the socket.
+    thread::sleep(Duration::from_millis(200));
+    let stream = TcpStream::connect_timeout(&destination, Duration::from_millis(1000));
     match stream {
         Ok(mut tcp_control) =>  {
            let _ = tcp_control.read(buffer);
@@ -395,6 +401,7 @@ fn main() {
         let destination: SocketAddr = destination_to.parse().expect("Invalid destination address");
         let mut channel = TtlSENDChannel::new_send();
         channel.send_bit(false, destination, &hashing); // Adjust the receiving end's TTL.
+
         tcp_control(&mut channel, data, destination);
     } else if action == "receive" {
         let hashing = PasswordBasedHash::new(&args[2].as_bytes());
