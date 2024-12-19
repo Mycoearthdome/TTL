@@ -18,9 +18,9 @@ const TTL_VALUE_BIT_0: u8 = 254;
 const TTL_VALUE_BIT_1: u8 = 253;
 const PACKET_SIZE: usize = 1400;
 const WINDOW_SIZE: usize = 1400;
-const BURSTS:u8 = 40;
+const BURSTS:u8 = 4;
 
-static mut PACKET_TRANSMISSION_RATE: u32 = 12; // packets per second
+static mut PACKET_TRANSMISSION_RATE: u32 = 2000; // packets per second
 
 #[derive(Debug, Clone)]
 struct UdpPacket {
@@ -114,7 +114,7 @@ impl TtlSENDChannel {
         self.socket.send_to(&packet, destination).unwrap();
     }
 
-    fn send_message(&mut self, data: Vec<u8>, destination: SocketAddr, burst: u8) {
+    fn send_message(&mut self, data: Vec<u8>, mut destination: SocketAddr, burst: u8) {
         let progress_bar_len = data.len() / WINDOW_SIZE;
 
         let bar = ProgressBar::new(progress_bar_len as u64);
@@ -123,11 +123,13 @@ impl TtlSENDChannel {
             self.socket.send_to(c, destination).unwrap();
             bar.inc(1 as u64);
             burst_count = burst_count + 1;
+            destination = SocketAddr::new(destination.ip(), destination.port() + 1);
             if burst_count == burst{
                 thread::sleep(Duration::from_millis(
                     (1000 / unsafe { PACKET_TRANSMISSION_RATE }).into(),
                 ));
                 burst_count = 0;
+                destination = SocketAddr::new(destination.ip(), destination.port() - burst as u16);
             }
         }
     }
@@ -232,23 +234,25 @@ impl TtlRECVChannel {
 
     fn receive_message(&mut self, initial_hashing: PasswordBasedHash) {
         let mut nb_packets: u64 = 0;
+        let mut nb_packets_processed = 0;
         let mut nb_ports_to_use = 0;
+        let mut stack: [Vec<Vec<u8>>; 4] = Default::default();
         let ipv4_header_len = std::mem::size_of::<Ipv4Header>();
         let udp_header_len = std::mem::size_of::<UdpHeader>();
         let packet_len = ipv4_header_len + udp_header_len + WINDOW_SIZE;
-        let total_header_len = ipv4_header_len + udp_header_len;
+        //let total_header_len = ipv4_header_len + udp_header_len;
         let mut buffer = vec![0u8; packet_len];
         let mut ttl_initiator = true;
         let mut src_addr: sockaddr = unsafe { mem::zeroed() };
         let mut addrlen: socklen_t = mem::size_of_val(&src_addr) as socklen_t;
         let mut tcp_recv_stream: TcpStream;
         let mut previous_source_addr = self.initialize_socket_address();
-        let mut data = Vec::new();
+        //let mut data = Vec::new();
         let mut bar: ProgressBar = ProgressBar::hidden();
         let mut original_destination_port = 0;
         loop {
             // Receive a packet
-            let bytes_received = unsafe {
+            let _bytes_received = unsafe {
                 libc::recvfrom(
                     self.socket,
                     buffer.as_mut_ptr() as *mut libc::c_void,
@@ -299,39 +303,48 @@ impl TtlRECVChannel {
                     bar = ProgressBar::new(nb_packets as u64);
                 } else {
                     let udp_packet = parse_udp_packet(&buffer).unwrap();
-                    match self.handle_payload(udp_packet, original_destination_port, nb_ports_to_use){
-                        Some(udp_payload) =>{
-                            bar.inc(1);
-                            data.extend(&udp_payload[..bytes_received as usize - total_header_len]);
-                        }
-                        None => {
-                        }
-                    }
-                    if bytes_received < packet_len as isize {
-                        break;
+                    self.handle_payload(udp_packet, original_destination_port, nb_ports_to_use, &mut stack);
+                    nb_packets_processed = nb_packets_processed + 1;
+                    bar.inc(1);
+                
+                    if nb_packets == nb_packets_processed {
+                    break;
                     }
                     buffer = vec![0u8; packet_len]; //clear
                 }
             }
         }
-        let _ = io::stdout().write_all(&data);
+        let _ = io::stdout().write_all(&self.reassemble_packets(stack, nb_packets));
         let _ = io::stdout().flush();
     }
 
-    fn handle_payload(&mut self, udp_packet:UdpPacket, original_destination_port: u16, nb_ports_total:u8) -> Option<Vec<u8>>{
+    fn handle_payload(&mut self, udp_packet:UdpPacket, original_destination_port: u16, nb_ports_total:u8, stack: &mut [Vec<Vec<u8>>;4]) {
         let max_port = original_destination_port + nb_ports_total as u16;
-        let mut is_our_port = false;
+        let mut stack_index = 0;
         for port in original_destination_port..max_port{
             if udp_packet.header.destination_port.to_be() == port{
-                is_our_port = true;
-                break;
+                stack[stack_index].push(udp_packet.payload.data.clone())
+            }
+            stack_index = stack_index + 1;
+            if stack_index == 4{
+                stack_index = 0;
             }
         }
-        if is_our_port{
-            Some(udp_packet.payload.data)
-        } else {
-            None
+    }
+
+    fn reassemble_packets(&mut self, mut stack: [Vec<Vec<u8>>;4], nb_packets:u64) -> Vec<u8>{
+        let mut reassembled_data = Vec::new();
+        let mut stack_index = 0;
+        for _packet in 0..nb_packets{
+            if let Some(payload) = stack[stack_index].pop() {
+                reassembled_data.extend(payload);
+            }
+            stack_index = stack_index + 1;
+            if stack_index == 4{
+                stack_index = 0;
+            }
         }
+        reassembled_data
     }
 }
 
