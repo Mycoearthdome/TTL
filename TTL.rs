@@ -1,9 +1,10 @@
 use indicatif::ProgressBar;
 use libc::{
     sockaddr, sockaddr_in, sockaddr_in6, socklen_t, AF_INET, AF_INET6, IPPROTO_IP, IPTOS_MINCOST,
-    IP_TOS, IP_TTL,
+    IP_TOS, IP_TTL, exit,
 };
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::env;
 use std::io::{self, Read, Write};
 use std::mem;
@@ -13,15 +14,15 @@ use std::net::{
 use std::os::unix::io::AsRawFd;
 use std::thread;
 use std::time::Duration;
-use std::collections::HashMap;
 
 const TTL_VALUE_BIT_0: u8 = 254;
 const TTL_VALUE_BIT_1: u8 = 253;
 const PACKET_SIZE: usize = 1400;
-const WINDOW_SIZE: usize = 1400;
+const WINDOW_SIZE: usize = 1408;
+const CHUNK_SIZE: usize = 1400;
 const BURSTS: u8 = 4;
 
-static mut PACKET_TRANSMISSION_RATE: u32 = 2000; // packets per second
+static mut PACKET_TRANSMISSION_RATE: u32 = 125; // packets per second
 
 #[derive(Debug, Clone)]
 struct UdpPacket {
@@ -116,12 +117,15 @@ impl TtlSENDChannel {
     }
 
     fn send_message(&mut self, data: Vec<u8>, mut destination: SocketAddr, burst: u8) {
-        let progress_bar_len = data.len() / WINDOW_SIZE;
-
+        let progress_bar_len: usize = if data.len() % CHUNK_SIZE == 0 {
+            data.len() / CHUNK_SIZE
+        } else {
+            (data.len() as f64 / CHUNK_SIZE as f64).floor() as usize + 1
+        };
         let bar = ProgressBar::new(progress_bar_len as u64);
         let mut burst_count = 0;
         let mut chunk_sequence_number = 0_i64.to_be_bytes();
-        for c in data.chunks(WINDOW_SIZE) {
+        for c in data.chunks(CHUNK_SIZE) {
             let payload_to_send = {
                 let mut payload: Vec<u8> = Vec::new();
                 payload.extend(chunk_sequence_number.iter());
@@ -263,7 +267,7 @@ impl TtlRECVChannel {
         let mut original_destination_port = 0;
         loop {
             // Receive a packet
-            let _bytes_received = unsafe {
+            let bytes_received = unsafe {
                 libc::recvfrom(
                     self.socket,
                     buffer.as_mut_ptr() as *mut libc::c_void,
@@ -313,7 +317,7 @@ impl TtlRECVChannel {
                     ttl_initiator = false;
                     bar = ProgressBar::new(nb_packets as u64);
                 } else {
-                    let udp_packet = parse_udp_packet(&buffer).unwrap();
+                    let udp_packet = parse_udp_packet(&buffer[..bytes_received as usize]).unwrap();
                     self.handle_payload(
                         udp_packet,
                         original_destination_port,
@@ -322,7 +326,6 @@ impl TtlRECVChannel {
                     );
                     nb_packets_processed = nb_packets_processed + 1;
                     bar.inc(1);
-
                     if nb_packets == nb_packets_processed {
                         break;
                     }
@@ -339,16 +342,17 @@ impl TtlRECVChannel {
         udp_packet: UdpPacket,
         original_destination_port: u16,
         nb_ports_total: u8,
-        stack: &mut [Vec<Vec<u8>>; 4],
+        stack: &mut [Vec<Vec<u8>>; BURSTS as usize],
     ) {
         let max_port = original_destination_port + nb_ports_total as u16;
         let mut stack_index = 0;
         for port in original_destination_port..max_port {
             if udp_packet.header.destination_port.to_be() == port {
-                stack[stack_index].push(udp_packet.payload.data.clone())
+                stack[stack_index].push(udp_packet.payload.data.clone());
+                break;
             }
             stack_index = stack_index + 1;
-            if stack_index == 4 {
+            if stack_index == BURSTS.into() {
                 stack_index = 0;
             }
         }
@@ -369,12 +373,15 @@ impl TtlRECVChannel {
                 stack_index = 0;
             }
         }
-        for index in 0..nb_packets as i64{
-            let payload = out_of_order_payloads.get(&index).unwrap();
-            for data in payload{
-                reassembled_data.push(*data)
+        for index in 0..nb_packets as i64 {
+            if let Some(payload) = out_of_order_payloads.get(&index) {
+                for data in payload {
+                    reassembled_data.push(*data)
+                }
+            } else {
+                println!("UDP dropped segments #{}..couldn't reassemble the file! Change Packets per seconds settings.", index); //TODO:TCP CAll
+                unsafe {exit(1)}; //failed
             }
-            
         }
         reassembled_data
     }
@@ -424,11 +431,16 @@ fn tcp_control(
     destination: SocketAddr,
     nb_total_ports: u8,
 ) {
-    let mut nb_packets = (data.len() / WINDOW_SIZE).to_be_bytes().to_vec();
+    let nb_packets = if data.len() % CHUNK_SIZE == 0 {
+        data.len() / CHUNK_SIZE
+    } else {
+        (data.len() as f64 / CHUNK_SIZE as f64).floor() as usize + 1
+    }; // TEST WINDOW_SIZE
+    let mut nb_packets = nb_packets.to_be_bytes().to_vec();
     nb_packets.push(nb_total_ports.to_be());
 
     // Establish a tcp communication after a short 200ms sleep to let the server time to set up the socket.
-    thread::sleep(Duration::from_millis(200));
+    thread::sleep(Duration::from_millis(220));
     let stream = TcpStream::connect_timeout(&destination, Duration::from_millis(1000));
     match stream {
         Ok(mut tcp_control) => {
@@ -471,7 +483,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 3 {
-        println!("Usage: ttl_channel [send*|receive] [destination*] [password] [Packets Bursts[40] Per Seconds*[default=12]] ");
+        println!("Usage: ttl_channel [send*|receive] [destination*] [password] [Packets Bursts[40] Per Seconds*[default=125]] ");
         return;
     }
 
