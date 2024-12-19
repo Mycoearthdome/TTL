@@ -13,12 +13,13 @@ use std::net::{
 use std::os::unix::io::AsRawFd;
 use std::thread;
 use std::time::Duration;
+use std::collections::HashMap;
 
 const TTL_VALUE_BIT_0: u8 = 254;
 const TTL_VALUE_BIT_1: u8 = 253;
 const PACKET_SIZE: usize = 1400;
 const WINDOW_SIZE: usize = 1400;
-const BURSTS:u8 = 4;
+const BURSTS: u8 = 4;
 
 static mut PACKET_TRANSMISSION_RATE: u32 = 2000; // packets per second
 
@@ -119,12 +120,22 @@ impl TtlSENDChannel {
 
         let bar = ProgressBar::new(progress_bar_len as u64);
         let mut burst_count = 0;
+        let mut chunk_sequence_number = 0_i64.to_be_bytes();
         for c in data.chunks(WINDOW_SIZE) {
-            self.socket.send_to(c, destination).unwrap();
+            let payload_to_send = {
+                let mut payload: Vec<u8> = Vec::new();
+                payload.extend(chunk_sequence_number.iter());
+                payload.extend(c.iter());
+                payload
+            };
+            self.socket.send_to(&payload_to_send, destination).unwrap();
             bar.inc(1 as u64);
             burst_count = burst_count + 1;
             destination = SocketAddr::new(destination.ip(), destination.port() + 1);
-            if burst_count == burst{
+            let mut seq_num = i64::from_be_bytes(chunk_sequence_number);
+            seq_num += 1;
+            chunk_sequence_number = seq_num.to_be_bytes();
+            if burst_count == burst {
                 thread::sleep(Duration::from_millis(
                     (1000 / unsafe { PACKET_TRANSMISSION_RATE }).into(),
                 ));
@@ -272,8 +283,7 @@ impl TtlRECVChannel {
                 if ttl_initiator {
                     self.receive_bit(ttl, udp_packet.clone(), &initial_hashing);
                     original_destination_port = udp_packet.header.destination_port.to_be();
-                    let tcp_incoming =
-                        self.open_tcp_control_port(original_destination_port);
+                    let tcp_incoming = self.open_tcp_control_port(original_destination_port);
                     match tcp_incoming.accept() {
                         Ok((tcp_receive_stream, socket_addr)) => {
                             if socket_addr.ip() == source_addr.ip() {
@@ -288,7 +298,8 @@ impl TtlRECVChannel {
                                 }
                                 nb_packets =
                                     u64::from_be_bytes(tcp_nb_packets[..8].try_into().unwrap());
-                                nb_ports_to_use = u8::from_be_bytes(tcp_nb_packets[8..9].try_into().unwrap());
+                                nb_ports_to_use =
+                                    u8::from_be_bytes(tcp_nb_packets[8..9].try_into().unwrap());
                                 previous_source_addr = socket_addr;
                                 tcp_recv_stream
                                     .shutdown(Shutdown::Both)
@@ -303,12 +314,17 @@ impl TtlRECVChannel {
                     bar = ProgressBar::new(nb_packets as u64);
                 } else {
                     let udp_packet = parse_udp_packet(&buffer).unwrap();
-                    self.handle_payload(udp_packet, original_destination_port, nb_ports_to_use, &mut stack);
+                    self.handle_payload(
+                        udp_packet,
+                        original_destination_port,
+                        nb_ports_to_use,
+                        &mut stack,
+                    );
                     nb_packets_processed = nb_packets_processed + 1;
                     bar.inc(1);
-                
+
                     if nb_packets == nb_packets_processed {
-                    break;
+                        break;
                     }
                     buffer = vec![0u8; packet_len]; //clear
                 }
@@ -318,31 +334,47 @@ impl TtlRECVChannel {
         let _ = io::stdout().flush();
     }
 
-    fn handle_payload(&mut self, udp_packet:UdpPacket, original_destination_port: u16, nb_ports_total:u8, stack: &mut [Vec<Vec<u8>>;4]) {
+    fn handle_payload(
+        &mut self,
+        udp_packet: UdpPacket,
+        original_destination_port: u16,
+        nb_ports_total: u8,
+        stack: &mut [Vec<Vec<u8>>; 4],
+    ) {
         let max_port = original_destination_port + nb_ports_total as u16;
         let mut stack_index = 0;
-        for port in original_destination_port..max_port{
-            if udp_packet.header.destination_port.to_be() == port{
+        for port in original_destination_port..max_port {
+            if udp_packet.header.destination_port.to_be() == port {
                 stack[stack_index].push(udp_packet.payload.data.clone())
             }
             stack_index = stack_index + 1;
-            if stack_index == 4{
+            if stack_index == 4 {
                 stack_index = 0;
             }
         }
     }
 
-    fn reassemble_packets(&mut self, mut stack: [Vec<Vec<u8>>;4], nb_packets:u64) -> Vec<u8>{
+    fn reassemble_packets(&mut self, mut stack: [Vec<Vec<u8>>; 4], nb_packets: u64) -> Vec<u8> {
         let mut reassembled_data = Vec::new();
         let mut stack_index = 0;
-        for _packet in 0..nb_packets{
+        let mut out_of_order_payloads = HashMap::new();
+        for _packet in 0..nb_packets {
             if let Some(payload) = stack[stack_index].pop() {
-                reassembled_data.extend(payload);
+                let chunk_sequence_number = i64::from_be_bytes(payload[..8].try_into().unwrap());
+                let payload = payload[8..].to_vec();
+                out_of_order_payloads.insert(chunk_sequence_number, payload);
             }
             stack_index = stack_index + 1;
-            if stack_index == 4{
+            if stack_index == 4 {
                 stack_index = 0;
             }
+        }
+        for index in 0..nb_packets as i64{
+            let payload = out_of_order_payloads.get(&index).unwrap();
+            for data in payload{
+                reassembled_data.push(*data)
+            }
+            
         }
         reassembled_data
     }
@@ -386,7 +418,12 @@ fn parse_udp_packet(buffer: &[u8]) -> Result<UdpPacket, &'static str> {
     })
 }
 
-fn tcp_control(channel: &mut TtlSENDChannel, data: Vec<u8>, destination: SocketAddr, nb_total_ports: u8) {
+fn tcp_control(
+    channel: &mut TtlSENDChannel,
+    data: Vec<u8>,
+    destination: SocketAddr,
+    nb_total_ports: u8,
+) {
     let mut nb_packets = (data.len() / WINDOW_SIZE).to_be_bytes().to_vec();
     nb_packets.push(nb_total_ports.to_be());
 
