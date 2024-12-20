@@ -22,7 +22,7 @@ const WINDOW_SIZE: usize = 1408;
 const CHUNK_SIZE: usize = 1400;
 const BURSTS: u8 = 4;
 
-static mut PACKET_TRANSMISSION_RATE: u32 = 125; // packets per second
+static mut PACKET_TRANSMISSION_RATE: u32 = 1000; // packets per second
 
 #[derive(Debug, Clone)]
 struct UdpPacket {
@@ -251,7 +251,7 @@ impl TtlRECVChannel {
         let mut nb_packets: u64 = 0;
         let mut nb_packets_processed = 0;
         let mut nb_ports_to_use = 0;
-        let mut stack: [Vec<Vec<u8>>; 4] = Default::default();
+        let mut stack: [Vec<Vec<u8>>; BURSTS as usize] = Default::default();
         let ipv4_header_len = std::mem::size_of::<Ipv4Header>();
         let udp_header_len = std::mem::size_of::<UdpHeader>();
         let packet_len = ipv4_header_len + udp_header_len + WINDOW_SIZE;
@@ -358,7 +358,7 @@ impl TtlRECVChannel {
         }
     }
 
-    fn reassemble_packets(&mut self, mut stack: [Vec<Vec<u8>>; 4], nb_packets: u64) -> Vec<u8> {
+    fn reassemble_packets(&mut self, mut stack: [Vec<Vec<u8>>; BURSTS as usize], nb_packets: u64) -> Vec<u8> {
         let mut reassembled_data = Vec::new();
         let mut stack_index = 0;
         let mut out_of_order_payloads = HashMap::new();
