@@ -22,7 +22,7 @@ const WINDOW_SIZE: usize = 1408;
 const CHUNK_SIZE: usize = 1400;
 const BURSTS: u8 = 4;
 
-static mut PACKET_TRANSMISSION_RATE: u32 = 1000; // packets per second
+static mut PACKET_TRANSMISSION_RATE: u32 = 1400; // packets per second
 
 #[derive(Debug, Clone)]
 struct UdpPacket {
@@ -266,7 +266,7 @@ impl TtlRECVChannel {
         let mut tcp_recv_stream: Option<TcpStream> = None;
         let mut previous_source_addr = self.initialize_socket_address();
         //let mut data = Vec::new();
-        //let mut bar: ProgressBar = ProgressBar::hidden();
+        let mut bar: ProgressBar = ProgressBar::hidden();
         let mut bytes_received: isize;
         let mut original_destination_port = 0;
         let mut fin_ack = false;
@@ -274,7 +274,7 @@ impl TtlRECVChannel {
         let mut secondary_loop_counter = 0;
         loop {
             main_loop_counter += 1;
-            dbg!(main_loop_counter);
+            //dbg!(main_loop_counter);
             let mut stack: [Vec<Vec<u8>>; BURSTS as usize] = Default::default();
             let mut buffer = vec![0u8; packet_len];
             if fin_ack {
@@ -284,12 +284,12 @@ impl TtlRECVChannel {
                     .as_ref()
                     .unwrap()
                     .write(&88888888_i64.to_be_bytes()); //READY MAGIC SENT.
-                dbg!("SENT READY MAGIC!");
+                //dbg!("SENT READY MAGIC!");
                 let _ = tcp_recv_stream.as_ref().unwrap().read(&mut ready_magic);
-                let confirm = i64::from_be_bytes(ready_magic);
-                if confirm == 88888888 {
-                    dbg!("RECEIVED MAGIC FROM CLIENT-READY!");
-                }
+                let _confirm = i64::from_be_bytes(ready_magic);
+                //if confirm == 88888888 {
+                    //dbg!("RECEIVED MAGIC FROM CLIENT-READY!");
+                //}
                 let bar = ProgressBar::new(nb_packets as u64);
                 loop {
                     bytes_received = unsafe {
@@ -315,11 +315,13 @@ impl TtlRECVChannel {
                             nb_ports_to_use,
                             &mut stack,
                         );
-                        nb_packets_processed = nb_packets_processed + 1;
-                        bar.inc(1);
+
                         if nb_packets == nb_packets_processed {
                             break;
                         }
+
+                        nb_packets_processed = nb_packets_processed + 1;
+                        bar.inc(1);
                         buffer = vec![0u8; packet_len]; //clear
                     }
                 }
@@ -330,8 +332,8 @@ impl TtlRECVChannel {
                     original_destination_port,
                     fin_ack,
                 );
-                dbg!(reassembled_packets.len());
-                dbg!(fin_ack);
+                //dbg!(reassembled_packets.len());
+                //dbg!(fin_ack);
                 let _ = io::stdout().write_all(&reassembled_packets[..]);
                 let _ = io::stdout().flush();
                 bar.abandon();
@@ -339,7 +341,7 @@ impl TtlRECVChannel {
             }
             loop {
                 secondary_loop_counter += 1;
-                dbg!(secondary_loop_counter);
+                //dbg!(secondary_loop_counter);
 
                 // TODO:BELOW....MAKE SURE THAT THE PACKETS CAPTURES ARE UDP(17) NOT TCP. TODO!
 
@@ -356,7 +358,7 @@ impl TtlRECVChannel {
                 };
 
                 if bytes_received == 136 {
-                    //bar.abandon();
+                    bar.abandon();
                     //Stream Interrupted.
                     break;
                 }
@@ -402,7 +404,7 @@ impl TtlRECVChannel {
                             }
                         }
                         ttl_initiator = false;
-                        //bar = ProgressBar::new(nb_packets as u64);
+                        bar = ProgressBar::new(nb_packets as u64);
                     } else {
                         let udp_packet =
                             parse_udp_packet(&buffer[..bytes_received as usize]).unwrap();
@@ -413,7 +415,7 @@ impl TtlRECVChannel {
                             &mut stack,
                         );
                         nb_packets_processed = nb_packets_processed + 1;
-                        //bar.inc(1);
+                        bar.inc(1);
                         if nb_packets == nb_packets_processed {
                             break;
                         }
@@ -429,15 +431,15 @@ impl TtlRECVChannel {
                 original_destination_port,
                 fin_ack,
             );
-            dbg!(reassembled_packets.len());
-            dbg!(fin_ack);
+            //dbg!(reassembled_packets.len());
+            //dbg!(fin_ack);
             if reassembled_packets.len() > 0 && fin_ack {
                 let _ = io::stdout().write_all(&reassembled_packets[..]);
                 let _ = io::stdout().flush();
                 break;
             }
-            //bar.abandon();
-            //bar = ProgressBar::new(nb_packets as u64);
+            bar.abandon();
+            bar = ProgressBar::new(nb_packets as u64);
             nb_packets_processed = 0;
             fin_ack = *last_try;
         }
@@ -524,6 +526,7 @@ impl TtlRECVChannel {
         let mut reassemble_packet_loop_counter = 0;
         let mut out_of_order_payloads = HashMap::new();
         let mut all_packets_passed = false;
+        let mut first_try_map = HashMap::new();
         for _packet in 0..nb_packets {
             if let Some(payload) = stack[stack_index].pop() {
                 let chunk_sequence_number = i64::from_be_bytes(payload[..8].try_into().unwrap());
@@ -536,31 +539,48 @@ impl TtlRECVChannel {
             }
         }
         loop {
+            first_try_map.clear();
             reassemble_packet_loop_counter += 1;
-            dbg!(reassemble_packet_loop_counter);
+            //dbg!(reassemble_packet_loop_counter);
+            //dbg!(last_try);
             for index in 0..nb_packets as i64 {
                 if let Some(payload) = out_of_order_payloads.get(&index) {
                     for data in payload {
                         reassembled_data.push(*data)
                     }
+                    first_try_map.insert(index, true);
                 } else {
-                    //println!("Missing chunk detected - Adjusting packet transmission rate");
+                    first_try_map.insert(index, false);
 
-                    thread::sleep(Duration::from_secs(3));
-
-                    let _ = tcp_recv_stream.unwrap().write(&index.to_be_bytes());
-                    let mut buffer: [u8; 4] = [0; 4];
-
-                    match tcp_recv_stream.unwrap().read(&mut buffer) {
-                        Ok(_n) => {
-                            let new_packet_transmission_rate: u32 =
-                                u32::from_be_bytes(buffer.try_into().unwrap());
-                            unsafe { PACKET_TRANSMISSION_RATE = new_packet_transmission_rate };
-                            all_packets_passed = self.recon(original_destination_port, nb_packets);
+                    if !last_try {
+                        if index == 0 {
+                            last_try = true;
+                            break;
                         }
-                        Err(e) => {
-                            println!("Error={}", e);
+                        //dbg!("Missing chunk detected - Adjusting packet transmission rate");
+
+                        //thread::sleep(Duration::from_secs(3));
+
+                        //dbg!(index);
+                        let _ = tcp_recv_stream.unwrap().write(&index.to_be_bytes());
+                        let mut buffer: [u8; 4] = [0; 4];
+
+                        match tcp_recv_stream.unwrap().read(&mut buffer) {
+                            Ok(_n) => {
+                                let new_packet_transmission_rate: u32 =
+                                    u32::from_be_bytes(buffer.try_into().unwrap());
+                                unsafe { PACKET_TRANSMISSION_RATE = new_packet_transmission_rate };
+                                all_packets_passed =
+                                    self.recon(original_destination_port, nb_packets);
+                            }
+                            Err(e) => {
+                                println!("Error={}", e);
+                            }
                         }
+                    } else {
+                        println!("FAILED ->with {} for packet transmission rate.", unsafe {
+                            PACKET_TRANSMISSION_RATE
+                        })
                     }
                 }
                 if all_packets_passed {
@@ -574,6 +594,20 @@ impl TtlRECVChannel {
                 break;
             } else if !last_try {
                 reassembled_data.clear();
+                break;
+            } else {
+                if last_try {
+                    break;
+                }
+                let mut count_positive = 0;
+                for (_, value) in first_try_map.clone() {
+                    if value {
+                        count_positive += 1;
+                    }
+                }
+                if count_positive == nb_packets {
+                    break;
+                }
             }
         }
 
@@ -587,7 +621,7 @@ impl TtlRECVChannel {
                 .shutdown(Shutdown::Both)
                 .expect("Shutdown TCP sockets failed!");
         }
-        dbg!(reassembled_data.len());
+        //dbg!(reassembled_data.len());
         (reassembled_data, last_try)
     }
 }
@@ -660,11 +694,12 @@ fn tcp_control(
                 println!("Waiting for missing chunk...");
                 match tcp_control.read(&mut missing_chunk) {
                     Ok(n) => {
-                        if n == 0 {
-                            dbg!("EXITING!");
-                            unsafe { exit(0) };
-                        }
                         index = i64::from_be_bytes(missing_chunk.try_into().unwrap());
+                        if n == 0 {
+                            index = 4444;
+                            //dbg!("EXITING!");
+                            //unsafe { exit(0) };
+                        }
                         if index == 4444 {
                             println!(
                                 "Adjusted Packet transmission rate - restarting...Please wait!"
@@ -692,6 +727,10 @@ fn tcp_control(
                         );
 
                         channel.send_message(&data, destination, nb_total_ports);
+                        if index == 0 {
+                            index = 4444;
+                            break;
+                        }
                     }
                     Err(e) => {
                         println!("Error={}", e);
@@ -701,13 +740,13 @@ fn tcp_control(
             if index == 4444 {
                 //SENDING IT THROUGH FOR THE LAST TIME.
                 let mut ready_magic: [u8; 8] = [0; 8]; //88888888
-                println!("Waiting for magic number from server...please wait!");
-                let _ = tcp_control.read(&mut ready_magic);
-                if i64::from_be_bytes(ready_magic) == 88888888 {
-                    let _ = tcp_control.write(&ready_magic);
-                    //thread::sleep(Duration::from_millis(3000)); //let tcp stream settle.
-                    channel.send_message(&data, destination, nb_total_ports);
-                }
+                    println!("Waiting for magic number from server...please wait!");
+                    let _ = tcp_control.read(&mut ready_magic);
+                    if i64::from_be_bytes(ready_magic) == 88888888 {
+                        let _ = tcp_control.write(&ready_magic);
+                        //thread::sleep(Duration::from_millis(3000)); //let tcp stream settle.
+                        channel.send_message(&data, destination, nb_total_ports);
+                    }
             }
         }
         Err(e) => {
