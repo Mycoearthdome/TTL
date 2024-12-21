@@ -20,7 +20,6 @@ const TTL_VALUE_BIT_1: u8 = 253;
 const PACKET_SIZE: usize = 1400;
 const WINDOW_SIZE: usize = 1408;
 const CHUNK_SIZE: usize = 1400;
-const BURSTS: u8 = 4;
 
 static mut PACKET_TRANSMISSION_RATE: u32 = 1400; // packets per second
 
@@ -116,7 +115,7 @@ impl TtlSENDChannel {
         self.socket.send_to(&packet, destination).unwrap();
     }
 
-    fn send_message(&mut self, data: &Vec<u8>, mut destination: SocketAddr, burst: u8) {
+    fn send_message(&mut self, data: &Vec<u8>, mut destination: SocketAddr, burst: u16) {
         //let mut sent_chunks: HashMap<i64, Vec<u8>> = HashMap::new();
         let progress_bar_len: usize = if data.len() % CHUNK_SIZE == 0 {
             data.len() / CHUNK_SIZE
@@ -133,6 +132,7 @@ impl TtlSENDChannel {
                 payload.extend(c.iter());
                 payload
             };
+           
             self.socket.send_to(&payload_to_send, destination).unwrap();
             bar.inc(1 as u64);
             burst_count = burst_count + 1;
@@ -252,7 +252,18 @@ impl TtlRECVChannel {
         sender_address_transform(&src_addr).unwrap()
     }
 
-    fn receive_message(&mut self, initial_hashing: PasswordBasedHash) {
+    fn initialize_stack(&mut self, bursts:u16) -> Vec<Vec<Vec<u8>>>{
+        let mut stack:Vec<Vec<Vec<u8>>> = Default::default();
+        for _layer1 in 0..bursts{
+            let mut layer2:Vec<Vec<u8>> = Default::default();
+            let new_depth: Vec<u8> = Default::default();
+            layer2.push(new_depth);
+            stack.push(layer2);
+        }
+        stack
+    }
+
+    fn receive_message(&mut self, bursts:u16 ,initial_hashing: PasswordBasedHash) {
         let mut nb_packets: u64 = 0;
         let mut nb_ports_to_use = 0;
         let mut nb_packets_processed = 0;
@@ -270,12 +281,12 @@ impl TtlRECVChannel {
         let mut bytes_received: isize;
         let mut original_destination_port = 0;
         let mut fin_ack = false;
-        let mut main_loop_counter = 0;
-        let mut secondary_loop_counter = 0;
+        //let mut main_loop_counter = 0;
+        //let mut secondary_loop_counter = 0;
         loop {
-            main_loop_counter += 1;
+            //main_loop_counter += 1;
             //dbg!(main_loop_counter);
-            let mut stack: [Vec<Vec<u8>>; BURSTS as usize] = Default::default();
+            let mut stack: Vec<Vec<Vec<u8>>> = self.initialize_stack(bursts);
             let mut buffer = vec![0u8; packet_len];
             if fin_ack {
                 let mut nb_packets_processed = 0;
@@ -331,6 +342,7 @@ impl TtlRECVChannel {
                     &mut tcp_recv_stream.as_ref(),
                     original_destination_port,
                     fin_ack,
+                    bursts,
                 );
                 //dbg!(reassembled_packets.len());
                 //dbg!(fin_ack);
@@ -340,7 +352,7 @@ impl TtlRECVChannel {
                 unsafe { exit(0) };
             }
             loop {
-                secondary_loop_counter += 1;
+                //secondary_loop_counter += 1;
                 //dbg!(secondary_loop_counter);
 
                 // TODO:BELOW....MAKE SURE THAT THE PACKETS CAPTURES ARE UDP(17) NOT TCP. TODO!
@@ -358,6 +370,7 @@ impl TtlRECVChannel {
                 };
 
                 if bytes_received == 136 {
+                    //dbg!("TERMINATION PACKETS RECEIVED!");
                     bar.abandon();
                     //Stream Interrupted.
                     break;
@@ -376,11 +389,11 @@ impl TtlRECVChannel {
                         match tcp_incoming.accept() {
                             Ok((mut tcp_receive_stream, socket_addr)) => {
                                 if socket_addr.ip() == source_addr.ip() {
-                                    let mut tcp_nb_packets = [0; 9];
+                                    let mut tcp_nb_packets = [0; 10];
                                     let bytes_read = tcp_receive_stream
                                         .read(&mut tcp_nb_packets)
                                         .expect("Failed to read from TCP stream");
-                                    if bytes_read != 9 {
+                                    if bytes_read != 10 {
                                         println!(
                                             "ERROR: Did not read enough bytes from TCP stream"
                                         );
@@ -389,7 +402,7 @@ impl TtlRECVChannel {
                                     nb_packets =
                                         u64::from_be_bytes(tcp_nb_packets[..8].try_into().unwrap());
                                     nb_ports_to_use =
-                                        u8::from_be_bytes(tcp_nb_packets[8..9].try_into().unwrap());
+                                        u16::from_be_bytes(tcp_nb_packets[8..10].try_into().unwrap());
                                     previous_source_addr = socket_addr;
                                     match tcp_receive_stream.try_clone() {
                                         Ok(stream) => tcp_recv_stream = Some(stream),
@@ -430,6 +443,7 @@ impl TtlRECVChannel {
                 &mut tcp_recv_stream.as_ref(),
                 original_destination_port,
                 fin_ack,
+                bursts,
             );
             //dbg!(reassembled_packets.len());
             //dbg!(fin_ack);
@@ -445,7 +459,7 @@ impl TtlRECVChannel {
         }
     }
 
-    fn recon(&mut self, original_destination_port: u16, nb_packets: u64) -> bool {
+    fn recon(&mut self, original_destination_port: u16, nb_packets: u64, bursts:u16) -> bool {
         let mut nb_packets_processed = 0;
         let ipv4_header_len = std::mem::size_of::<Ipv4Header>();
         let udp_header_len = std::mem::size_of::<UdpHeader>();
@@ -453,7 +467,7 @@ impl TtlRECVChannel {
         let mut buffer = vec![0u8; packet_len];
         let mut src_addr: sockaddr = unsafe { mem::zeroed() };
         let mut addrlen: socklen_t = mem::size_of_val(&src_addr) as socklen_t;
-        let mut stack: [Vec<Vec<u8>>; BURSTS as usize] = Default::default();
+        let mut stack: Vec<Vec<Vec<u8>>> = Default::default();
         let bar = ProgressBar::new(nb_packets as u64);
         loop {
             // Receive a packet
@@ -467,14 +481,16 @@ impl TtlRECVChannel {
                     &mut addrlen,
                 )
             };
-
-            if bytes_received == 136 {
+            
+            if bytes_received == 136 { //termination packet.
+                //dbg!("TEMINATION PACKET RECEIVED!");
+                bar.abandon();
                 //Stream Interrupted.
                 break;
             }
 
             let udp_packet = parse_udp_packet(&buffer[..bytes_received as usize]).unwrap();
-            self.handle_payload(udp_packet, original_destination_port, BURSTS, &mut stack);
+            self.handle_payload(udp_packet, original_destination_port, bursts, &mut stack);
 
             nb_packets_processed = nb_packets_processed + 1;
             bar.inc(1);
@@ -496,73 +512,74 @@ impl TtlRECVChannel {
         &mut self,
         udp_packet: UdpPacket,
         original_destination_port: u16,
-        nb_ports_total: u8,
-        stack: &mut [Vec<Vec<u8>>; BURSTS as usize],
+        nb_ports_total: u16,
+        stack: &mut Vec<Vec<Vec<u8>>>,
     ) {
         let max_port = original_destination_port + nb_ports_total as u16;
-        let mut stack_index = 0;
+        let mut stack_payload = Vec::new();
         for port in original_destination_port..max_port {
             if udp_packet.header.destination_port.to_be() == port {
-                stack[stack_index].push(udp_packet.payload.data.clone());
+                stack_payload.push(udp_packet.payload.data.clone());
+                stack.push(stack_payload);
                 break;
-            }
-            stack_index = stack_index + 1;
-            if stack_index == BURSTS.into() {
-                stack_index = 0;
             }
         }
     }
 
     fn reassemble_packets(
         &mut self,
-        mut stack: [Vec<Vec<u8>>; BURSTS as usize],
+        mut stack: Vec<Vec<Vec<u8>>>,
         nb_packets: u64,
         tcp_recv_stream: &mut Option<&TcpStream>,
         original_destination_port: u16,
         mut last_try: bool,
+        bursts:u16,
     ) -> (Vec<u8>, bool) {
         let mut reassembled_data = Vec::new();
-        let mut stack_index = 0;
-        let mut reassemble_packet_loop_counter = 0;
+        //let mut reassemble_packet_loop_counter = 0;
         let mut out_of_order_payloads = HashMap::new();
         let mut all_packets_passed = false;
         let mut first_try_map = HashMap::new();
         for _packet in 0..nb_packets {
-            if let Some(payload) = stack[stack_index].pop() {
-                let chunk_sequence_number = i64::from_be_bytes(payload[..8].try_into().unwrap());
-                let payload = payload[8..].to_vec();
-                out_of_order_payloads.insert(chunk_sequence_number, payload);
-            }
-            stack_index = stack_index + 1;
-            if stack_index == 4 {
-                stack_index = 0;
+            match stack.pop(){
+                Some(mut stack_payload) =>{
+                    let payload = stack_payload.pop().unwrap();
+                    if payload.len() > 0{
+                    let chunk_sequence_number = i64::from_be_bytes(payload[..8].try_into().unwrap());
+                    let payload = payload[8..].to_vec();
+                    out_of_order_payloads.insert(chunk_sequence_number, payload);
+                    }
+                }
+                None =>{}
             }
         }
         loop {
             first_try_map.clear();
-            reassemble_packet_loop_counter += 1;
+            //reassemble_packet_loop_counter += 1;
             //dbg!(reassemble_packet_loop_counter);
             //dbg!(last_try);
             for index in 0..nb_packets as i64 {
                 if let Some(payload) = out_of_order_payloads.get(&index) {
-                    for data in payload {
-                        reassembled_data.push(*data)
+                    if payload.len() > 0{
+                        for data in payload {
+                            reassembled_data.push(*data)
+                        }
+                        first_try_map.insert(index, true);
                     }
-                    first_try_map.insert(index, true);
                 } else {
                     first_try_map.insert(index, false);
 
                     if !last_try {
-                        if index == 0 {
-                            last_try = true;
-                            break;
-                        }
+                        //if index == 0 {
+                        //    last_try = true;
+                        //    break;
+                        //}
                         //dbg!("Missing chunk detected - Adjusting packet transmission rate");
 
                         //thread::sleep(Duration::from_secs(3));
 
                         //dbg!(index);
-                        let _ = tcp_recv_stream.unwrap().write(&index.to_be_bytes());
+                        let _ = tcp_recv_stream.unwrap().write(&index.to_be_bytes()); //MISSING_CHUNK's INDEX
                         let mut buffer: [u8; 4] = [0; 4];
 
                         match tcp_recv_stream.unwrap().read(&mut buffer) {
@@ -571,7 +588,7 @@ impl TtlRECVChannel {
                                     u32::from_be_bytes(buffer.try_into().unwrap());
                                 unsafe { PACKET_TRANSMISSION_RATE = new_packet_transmission_rate };
                                 all_packets_passed =
-                                    self.recon(original_destination_port, nb_packets);
+                                    self.recon(original_destination_port, nb_packets, bursts);
                             }
                             Err(e) => {
                                 println!("Error={}", e);
@@ -587,7 +604,6 @@ impl TtlRECVChannel {
                     break;
                 }
             }
-            //dbg!(last_try);
             if all_packets_passed && !last_try {
                 let _ = tcp_recv_stream.unwrap().write(&4444_isize.to_be_bytes()); //Magic number to start over on the client side.
                 reassembled_data.clear();
@@ -668,7 +684,7 @@ fn tcp_control(
     channel: &mut TtlSENDChannel,
     data: Vec<u8>,
     destination: SocketAddr,
-    nb_total_ports: u8,
+    nb_total_ports: u16,
 ) {
     let nb_packets = if data.len() % CHUNK_SIZE == 0 {
         data.len() / CHUNK_SIZE
@@ -676,7 +692,7 @@ fn tcp_control(
         (data.len() as f64 / CHUNK_SIZE as f64).floor() as usize + 1
     };
     let mut nb_packets = nb_packets.to_be_bytes().to_vec();
-    nb_packets.push(nb_total_ports.to_be());
+    nb_packets.extend(nb_total_ports.to_be_bytes().to_vec());
 
     // Establish a tcp communication after a short 200ms sleep to let the server time to set up the socket.
     thread::sleep(Duration::from_millis(220));
@@ -688,7 +704,7 @@ fn tcp_control(
             channel.send_message(&data, destination, nb_total_ports);
             let mut missing_chunk: [u8; 8] = [0; 8];
             loop {
-                println!("Sending termination packet to the server...");
+                println!("Sending termination packet to the server..."); //136
                 let terminate_packet: [u8; 100] = [0; 100];
                 channel.send_message(&terminate_packet.to_vec(), destination, nb_total_ports);
                 println!("Waiting for missing chunk...");
@@ -782,18 +798,20 @@ fn sender_address_transform(src_addr: &sockaddr) -> Option<SocketAddr> {
 }
 
 fn main() {
+    let mut bursts: u16 = 4;
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 3 {
-        println!("Usage: ttl_channel [send*|receive] [destination*] [password] [Packets Bursts[40] Per Seconds*[default=125]] ");
+        println!("Usage: ttl_channel [send*|receive] [destination*] [password] [Bursts*[default=4] [Packets Bursts[40] Per Seconds*[default=1400]] ");
         return;
     }
 
     let action = &args[1];
     if action == "send" {
         let hashing = PasswordBasedHash::new(&args[3].as_bytes());
-        if args.len() == 5 {
-            unsafe { PACKET_TRANSMISSION_RATE = args[4].parse().unwrap() };
+        if args.len() == 6 {
+            unsafe { PACKET_TRANSMISSION_RATE = args[5].parse().unwrap() };
+            bursts = args[4].parse().unwrap();
         }
         let mut data = Vec::new();
         io::stdin()
@@ -804,11 +822,11 @@ fn main() {
         let mut channel = TtlSENDChannel::new_send();
         channel.send_bit(false, destination, &hashing); // Adjust the receiving end's TTL.
 
-        tcp_control(&mut channel, data, destination, BURSTS);
+        tcp_control(&mut channel, data, destination, bursts);
     } else if action == "receive" {
         let hashing = PasswordBasedHash::new(&args[2].as_bytes());
         let mut channel = TtlRECVChannel::new_receive();
-        channel.receive_message(hashing);
+        channel.receive_message(bursts, hashing);
     } else {
         println!("Invalid action. Please use 'send' or 'receive'.");
     }
