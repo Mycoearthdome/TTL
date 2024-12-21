@@ -254,26 +254,95 @@ impl TtlRECVChannel {
 
     fn receive_message(&mut self, initial_hashing: PasswordBasedHash) {
         let mut nb_packets: u64 = 0;
-        let mut nb_packets_processed = 0;
         let mut nb_ports_to_use = 0;
-        let mut stack: [Vec<Vec<u8>>; BURSTS as usize] = Default::default();
+        let mut nb_packets_processed = 0;
         let ipv4_header_len = std::mem::size_of::<Ipv4Header>();
         let udp_header_len = std::mem::size_of::<UdpHeader>();
         let packet_len = ipv4_header_len + udp_header_len + WINDOW_SIZE;
         //let total_header_len = ipv4_header_len + udp_header_len;
         let mut ttl_initiator: bool = true;
-        let mut buffer = vec![0u8; packet_len];
         let mut src_addr: sockaddr = unsafe { mem::zeroed() };
         let mut addrlen: socklen_t = mem::size_of_val(&src_addr) as socklen_t;
         let mut tcp_recv_stream: Option<TcpStream> = None;
         let mut previous_source_addr = self.initialize_socket_address();
         //let mut data = Vec::new();
-        let mut bar: ProgressBar = ProgressBar::hidden();
+        //let mut bar: ProgressBar = ProgressBar::hidden();
         let mut bytes_received: isize;
         let mut original_destination_port = 0;
         let mut fin_ack = false;
+        let mut main_loop_counter = 0;
+        let mut secondary_loop_counter = 0;
         loop {
+            main_loop_counter += 1;
+            dbg!(main_loop_counter);
+            let mut stack: [Vec<Vec<u8>>; BURSTS as usize] = Default::default();
+            let mut buffer = vec![0u8; packet_len];
+            if fin_ack {
+                let mut nb_packets_processed = 0;
+                let mut ready_magic: [u8; 8] = [0; 8]; //88888888
+                let _ = tcp_recv_stream
+                    .as_ref()
+                    .unwrap()
+                    .write(&88888888_i64.to_be_bytes()); //READY MAGIC SENT.
+                dbg!("SENT READY MAGIC!");
+                let _ = tcp_recv_stream.as_ref().unwrap().read(&mut ready_magic);
+                let confirm = i64::from_be_bytes(ready_magic);
+                if confirm == 88888888 {
+                    dbg!("RECEIVED MAGIC FROM CLIENT-READY!");
+                }
+                let bar = ProgressBar::new(nb_packets as u64);
+                loop {
+                    bytes_received = unsafe {
+                        libc::recvfrom(
+                            self.socket,
+                            buffer.as_mut_ptr() as *mut libc::c_void,
+                            buffer.len(),
+                            0,
+                            &mut src_addr as *mut _,
+                            &mut addrlen,
+                        )
+                    };
+
+                    let src_addr = unsafe { &*(&src_addr as *const sockaddr) };
+                    let source_addr = sender_address_transform(src_addr).unwrap();
+
+                    if previous_source_addr.ip() == source_addr.ip() {
+                        let udp_packet =
+                            parse_udp_packet(&buffer[..bytes_received as usize]).unwrap();
+                        self.handle_payload(
+                            udp_packet,
+                            original_destination_port,
+                            nb_ports_to_use,
+                            &mut stack,
+                        );
+                        nb_packets_processed = nb_packets_processed + 1;
+                        bar.inc(1);
+                        if nb_packets == nb_packets_processed {
+                            break;
+                        }
+                        buffer = vec![0u8; packet_len]; //clear
+                    }
+                }
+                let (reassembled_packets, _last_try) = &self.reassemble_packets(
+                    stack.clone(),
+                    nb_packets,
+                    &mut tcp_recv_stream.as_ref(),
+                    original_destination_port,
+                    fin_ack,
+                );
+                dbg!(reassembled_packets.len());
+                dbg!(fin_ack);
+                let _ = io::stdout().write_all(&reassembled_packets[..]);
+                let _ = io::stdout().flush();
+                bar.abandon();
+                unsafe { exit(0) };
+            }
             loop {
+                secondary_loop_counter += 1;
+                dbg!(secondary_loop_counter);
+
+                // TODO:BELOW....MAKE SURE THAT THE PACKETS CAPTURES ARE UDP(17) NOT TCP. TODO!
+
                 // Receive a packet
                 bytes_received = unsafe {
                     libc::recvfrom(
@@ -287,7 +356,7 @@ impl TtlRECVChannel {
                 };
 
                 if bytes_received == 136 {
-                    bar.abandon();
+                    //bar.abandon();
                     //Stream Interrupted.
                     break;
                 }
@@ -333,7 +402,7 @@ impl TtlRECVChannel {
                             }
                         }
                         ttl_initiator = false;
-                        bar = ProgressBar::new(nb_packets as u64);
+                        //bar = ProgressBar::new(nb_packets as u64);
                     } else {
                         let udp_packet =
                             parse_udp_packet(&buffer[..bytes_received as usize]).unwrap();
@@ -344,7 +413,7 @@ impl TtlRECVChannel {
                             &mut stack,
                         );
                         nb_packets_processed = nb_packets_processed + 1;
-                        bar.inc(1);
+                        //bar.inc(1);
                         if nb_packets == nb_packets_processed {
                             break;
                         }
@@ -352,6 +421,7 @@ impl TtlRECVChannel {
                     }
                 }
             }
+
             let (reassembled_packets, last_try) = &self.reassemble_packets(
                 stack.clone(),
                 nb_packets,
@@ -359,12 +429,16 @@ impl TtlRECVChannel {
                 original_destination_port,
                 fin_ack,
             );
-
-            if fin_ack{
-                let _ = io::stdout().write_all(&reassembled_packets);
+            dbg!(reassembled_packets.len());
+            dbg!(fin_ack);
+            if reassembled_packets.len() > 0 && fin_ack {
+                let _ = io::stdout().write_all(&reassembled_packets[..]);
                 let _ = io::stdout().flush();
                 break;
             }
+            //bar.abandon();
+            //bar = ProgressBar::new(nb_packets as u64);
+            nb_packets_processed = 0;
             fin_ack = *last_try;
         }
     }
@@ -443,10 +517,11 @@ impl TtlRECVChannel {
         nb_packets: u64,
         tcp_recv_stream: &mut Option<&TcpStream>,
         original_destination_port: u16,
-        mut last_try:bool,
+        mut last_try: bool,
     ) -> (Vec<u8>, bool) {
         let mut reassembled_data = Vec::new();
         let mut stack_index = 0;
+        let mut reassemble_packet_loop_counter = 0;
         let mut out_of_order_payloads = HashMap::new();
         let mut all_packets_passed = false;
         for _packet in 0..nb_packets {
@@ -461,6 +536,8 @@ impl TtlRECVChannel {
             }
         }
         loop {
+            reassemble_packet_loop_counter += 1;
+            dbg!(reassemble_packet_loop_counter);
             for index in 0..nb_packets as i64 {
                 if let Some(payload) = out_of_order_payloads.get(&index) {
                     for data in payload {
@@ -490,21 +567,27 @@ impl TtlRECVChannel {
                     break;
                 }
             }
-            if all_packets_passed && !last_try{
+            //dbg!(last_try);
+            if all_packets_passed && !last_try {
                 let _ = tcp_recv_stream.unwrap().write(&4444_isize.to_be_bytes()); //Magic number to start over on the client side.
                 reassembled_data.clear();
                 break;
-            } else if !last_try{
+            } else if !last_try {
                 reassembled_data.clear();
             }
         }
-        if !last_try{
+
+        if all_packets_passed {
+            last_try = true;
+        }
+
+        if !last_try {
             tcp_recv_stream
                 .unwrap()
                 .shutdown(Shutdown::Both)
                 .expect("Shutdown TCP sockets failed!");
-            last_try= true;
         }
+        dbg!(reassembled_data.len());
         (reassembled_data, last_try)
     }
 }
@@ -608,8 +691,6 @@ fn tcp_control(
                             u32::from_be_bytes(new_transmission_rate)
                         );
 
-                        thread::sleep(Duration::from_secs(3));
-
                         channel.send_message(&data, destination, nb_total_ports);
                     }
                     Err(e) => {
@@ -619,8 +700,14 @@ fn tcp_control(
             }
             if index == 4444 {
                 //SENDING IT THROUGH FOR THE LAST TIME.
-                thread::sleep(Duration::from_secs(3));
-                channel.send_message(&data, destination, nb_total_ports);
+                let mut ready_magic: [u8; 8] = [0; 8]; //88888888
+                println!("Waiting for magic number from server...please wait!");
+                let _ = tcp_control.read(&mut ready_magic);
+                if i64::from_be_bytes(ready_magic) == 88888888 {
+                    let _ = tcp_control.write(&ready_magic);
+                    //thread::sleep(Duration::from_millis(3000)); //let tcp stream settle.
+                    channel.send_message(&data, destination, nb_total_ports);
+                }
             }
         }
         Err(e) => {
